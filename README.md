@@ -225,4 +225,49 @@ To reset the app:
 
 ---
 
+## Run locally (privacy / offline use)
+
+If you are concerned about privacy or prefer to keep all data on your machine, you can run the app locally. When run locally the app processes files only on your computer — no data is uploaded to any external server.
+
+Recommended steps (macOS / zsh):
+
+1. Create and activate a virtual environment
+
+   zsh commands:
+   python3 -m venv venv
+   source venv/bin/activate
+
+2. Install dependencies
+
+   pip install -r requirements.txt
+
+   Note: This requires internet access once to download packages. If you need fully offline installation, create a wheelhouse on another machine and install from that.
+
+3. Run the Streamlit app
+
+   streamlit run app_streamlit.py
+
+   By default this opens the app in your browser at http://localhost:8501 and keeps all processing local.
+
+4. Using a local folder as data source
+
+   - In the app sidebar choose "Folder (server)" or the equivalent option.
+   - Enter an absolute or relative path to the folder on your machine containing the CSV files.
+   - Tick "Scan folder now" (or click the scan/load button) to load files. The app will read files from that path on your disk.
+
+5. Tips for strict offline use
+
+   - Install dependencies before disconnecting from the internet.
+   - Do not enable any cloud integrations or remote paths in the app settings.
+   - If you need to share the app with colleagues in a closed network, package the virtual environment or provide a requirements wheelhouse.
+
+Quick commands (zsh):
+
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+streamlit run app_streamlit.py
+
+---
+
 ## End of README
