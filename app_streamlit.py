@@ -15,18 +15,40 @@ st.markdown("Upload CSV files (or a ZIP) and export raw sheets or calculated sum
 # --- Sidebar: upload and settings ---
 with st.sidebar.form("upload_form"):
     st.header("Upload / Source")
-    upload_mode = st.selectbox("Upload mode", ["Multiple CSV files", "Folder (server)", "ZIP archive (upload)"], index=0)
+    privacy_mode = st.checkbox(
+        "Enable privacy mode (data stays local; disables server folder access)",
+        value=True,
+    )
+
+    if privacy_mode:
+        upload_mode = st.selectbox(
+            "Upload mode",
+            ["Multiple CSV files", "ZIP archive (upload)"],
+            index=0,
+        )
+    else:
+        upload_mode = st.selectbox(
+            "Upload mode",
+            ["Multiple CSV files", "Folder (server)", "ZIP archive (upload)"],
+            index=0,
+        )
 
     uploaded = None
     folder_path = None
     scan_folder = False
+
     if upload_mode == "Multiple CSV files":
         uploaded = st.file_uploader("Choose one or more CSV files", type=["csv"], accept_multiple_files=True)
     elif upload_mode == "ZIP archive (upload)":
         uploaded = st.file_uploader("Upload a ZIP containing CSV files", type=["zip"], accept_multiple_files=False)
     else:
-        folder_path = st.text_input("Enter folder path on server (absolute or relative to app)")
-        scan_folder = st.checkbox("Scan folder now")
+        st.warning("Folder access will read files from the server running this app. Do not use this on a public/shared server with sensitive data.")
+        confirm_folder = st.checkbox("I understand the privacy implications and want to load files from a server folder")
+        if confirm_folder:
+            folder_path = st.text_input("Enter folder path on server (absolute or relative to app)")
+            scan_folder = st.checkbox("Scan folder now")
+        else:
+            st.info("Folder access is disabled until you confirm the privacy implications.")
 
     MAX_FILE_MB = 100
 
@@ -310,7 +332,7 @@ elif upload_mode == "ZIP archive (upload)" and uploaded:
         except Exception as e:
             st.error(f"Failed to read uploaded ZIP: {e}")
 
-elif upload_mode == "Folder (server)":
+elif upload_mode == "Folder (server)" and not privacy_mode:
     if folder_path and scan_folder:
         if st.button("Scan folder and load CSVs"):
             p = Path(folder_path)
