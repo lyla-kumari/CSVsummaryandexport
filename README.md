@@ -1,5 +1,7 @@
 # Export App
 
+**User manual:** See `USER_MANUAL.md` in the project root. The app also displays this manual inside the UI under "User manual — click to view".
+
 ## README
 
 **Version:** 1.1  

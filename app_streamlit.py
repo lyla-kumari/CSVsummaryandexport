@@ -12,6 +12,17 @@ st.set_page_config(page_title="Export App", layout="centered")
 
 st.title("Export App")
 st.markdown("Upload CSV files (or a ZIP) and export raw sheets or calculated summary statistics.")
+# show user manual content from local file so the link works when app is run locally
+manual_path = Path("USER_MANUAL.md")
+if manual_path.exists():
+    with st.expander("User manual — click to view", expanded=False):
+        try:
+            content = manual_path.read_text(encoding="utf-8")
+            st.markdown(content)
+        except Exception as e:
+            st.error(f"Failed to load USER_MANUAL.md: {e}")
+else:
+    st.markdown("**User manual:** not found in app folder. Create `USER_MANUAL.md` in the same folder to show the guide.")
 
 # --- Sidebar: upload and settings ---
 with st.sidebar.form("upload_form"):
