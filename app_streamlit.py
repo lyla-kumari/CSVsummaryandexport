@@ -2,6 +2,7 @@ import io
 import re
 import streamlit as st
 import pandas as pd
+import numpy as np
 import zipfile
 from pathlib import Path
 from typing import Dict, List
@@ -291,10 +292,217 @@ def export_summary_excel(all_df: pd.DataFrame) -> bytes:
     return out.getvalue()
 
 
+def parse_derived_definitions(text: str):
+    """Parse derived column definitions from text input into ASTs and validate weights.
+
+    Returns a tuple (defs, warnings) where defs is a list of dicts {'name','expr'} and
+    warnings is a list of human-readable warning messages.
+    """
+    defs = []
+    warnings = []
+    if not text:
+        return defs, warnings
+
+    def split_top_level_commas(s: str):
+        parts = []
+        cur = []
+        depth = 0
+        for ch in s:
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            if ch == ',' and depth == 0:
+                parts.append(''.join(cur).strip())
+                cur = []
+            else:
+                cur.append(ch)
+        if cur:
+            parts.append(''.join(cur).strip())
+        return parts
+
+    def find_top_level_colon(s: str):
+        depth = 0
+        idx = -1
+        for i, ch in enumerate(s):
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            elif ch == ':' and depth == 0:
+                idx = i
+        return idx
+
+    def parse_expr(s: str):
+        s = s.strip()
+        # numeric literal
+        if re.fullmatch(r'[+-]?\d+(?:\.\d+)?', s):
+            return {'type': 'const', 'value': float(s)}
+        # function call
+        m = re.fullmatch(r'([A-Za-z_]\w*)\s*\((.*)\)', s)
+        if m:
+            fname = m.group(1).lower()
+            inner = m.group(2)
+            raw_args = split_top_level_commas(inner) if inner.strip() else []
+            args = []
+            for raw in raw_args:
+                if not raw:
+                    continue
+                cidx = find_top_level_colon(raw)
+                if cidx >= 0:
+                    expr_part = raw[:cidx].strip()
+                    weight_part = raw[cidx+1:].strip()
+                    try:
+                        weight_val = float(weight_part)
+                        if weight_val < 0:
+                            warnings.append(f"Negative weight {weight_val} in argument '{raw}'")
+                    except Exception:
+                        weight_val = None
+                        warnings.append(f"Non-numeric weight in argument '{raw}'; treating as None")
+                    node = parse_expr(expr_part)
+                    args.append({'node': node, 'weight': weight_val})
+                else:
+                    node = parse_expr(raw)
+                    args.append({'node': node, 'weight': None})
+            if fname in ('wmean', 'weightedmean', 'wweightedmean'):
+                return {'type': 'wmean', 'parts': args}
+            return {'type': 'func', 'name': fname, 'args': [a['node'] for a in args], 'raw_args': args}
+        # otherwise identifier (column name)
+        return {'type': 'col', 'name': s}
+
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r'^\s*([^=]+?)\s*=\s*(.+)$', line)
+        if not m:
+            warnings.append(f"Line {lineno}: unable to parse (no '='): {line}")
+            continue
+        name = m.group(1).strip()
+        rhs = m.group(2).strip()
+        try:
+            expr = parse_expr(rhs)
+            defs.append({'name': name, 'expr': expr})
+        except Exception as e:
+            warnings.append(f"Line {lineno}: failed to parse expression for {name}: {e}")
+            continue
+    return defs, warnings
+
+
+def evaluate_expr(node, df: pd.DataFrame):
+    """Evaluate an expression AST node against a dataframe and return a pandas Series."""
+    if node is None:
+        return pd.Series([np.nan] * len(df), index=df.index)
+    ntype = node.get('type')
+    if ntype == 'const':
+        return pd.Series([node['value']] * len(df), index=df.index)
+    if ntype == 'col':
+        col = node.get('name')
+        if col in df.columns:
+            return pd.to_numeric(df[col], errors='coerce')
+        # missing column -> all NaN
+        return pd.Series([np.nan] * len(df), index=df.index)
+    if ntype == 'func':
+        name = node.get('name')
+        args = node.get('args', [])
+        series_args = [evaluate_expr(a, df) for a in args]
+        if name in ('sum',):
+            if not series_args:
+                return pd.Series([np.nan] * len(df), index=df.index)
+            stacked = pd.concat(series_args, axis=1)
+            return stacked.sum(axis=1, skipna=True)
+        if name in ('mean', 'avg', 'average'):
+            if not series_args:
+                return pd.Series([np.nan] * len(df), index=df.index)
+            stacked = pd.concat(series_args, axis=1)
+            return stacked.mean(axis=1, skipna=True)
+        if name in ('median',):
+            if not series_args:
+                return pd.Series([np.nan] * len(df), index=df.index)
+            stacked = pd.concat(series_args, axis=1)
+            return stacked.median(axis=1, skipna=True)
+        if name in ('ratio', 'r'):
+            if len(series_args) < 2:
+                return pd.Series([np.nan] * len(df), index=df.index)
+            num = series_args[0]
+            den = series_args[1]
+            # avoid division by zero
+            den_safe = den.replace(0, np.nan)
+            return num.divide(den_safe)
+        # unknown function -> return NaN series
+        return pd.Series([np.nan] * len(df), index=df.index)
+    if ntype == 'wmean':
+        parts = node.get('parts', [])
+        if not parts:
+            return pd.Series([np.nan] * len(df), index=df.index)
+        numer = pd.Series([0.0] * len(df), index=df.index)
+        denom = pd.Series([0.0] * len(df), index=df.index)
+        for p in parts:
+            subnode = p.get('node')
+            weight = p.get('weight')
+            if weight is None:
+                # default weight 1.0
+                weight = 1.0
+            try:
+                s = evaluate_expr(subnode, df)
+            except Exception:
+                s = pd.Series([np.nan] * len(df), index=df.index)
+            s_num = s.fillna(0.0)
+            valid_mask = ~s.isna()
+            numer += s_num * float(weight)
+            denom += valid_mask.astype(float) * float(weight)
+        # avoid divide by zero
+        denom_safe = denom.replace(0, np.nan)
+        return numer.divide(denom_safe)
+    # fallback
+    return pd.Series([np.nan] * len(df), index=df.index)
+
+
+def expr_to_str(node):
+    """Render expression AST back to a readable string."""
+    if not node:
+        return ''
+    t = node.get('type')
+    if t == 'const':
+        return str(node.get('value'))
+    if t == 'col':
+        return node.get('name', '')
+    if t == 'wmean':
+        parts = []
+        for p in node.get('parts', []):
+            sub = expr_to_str(p.get('node'))
+            w = p.get('weight')
+            if w is not None:
+                parts.append(f"{sub}:{w}")
+            else:
+                parts.append(sub)
+        return f"wmean({', '.join(parts)})"
+    if t == 'func':
+        name = node.get('name', '')
+        raw = node.get('raw_args')
+        if raw:
+            parts = []
+            for a in raw:
+                sub = expr_to_str(a.get('node'))
+                w = a.get('weight')
+                if w is not None:
+                    parts.append(f"{sub}:{w}")
+                else:
+                    parts.append(sub)
+            return f"{name}({', '.join(parts)})"
+        else:
+            parts = [expr_to_str(a) for a in node.get('args', [])]
+            return f"{name}({', '.join(parts)})"
+    return ''
+
+
 # --- Data loading: explicit action ---
 # store uploaded dfs in session to avoid re-loading on every interaction
 if 'dfs' not in st.session_state:
     st.session_state.dfs = {}
+# map: filename -> list of (original_col, sanitized_col)
+if 'colname_map' not in st.session_state:
+    st.session_state.colname_map = {}
 
 load_trigger = False
 if upload_mode == "Multiple CSV files" and uploaded:
@@ -302,6 +510,7 @@ if upload_mode == "Multiple CSV files" and uploaded:
         # user provided files in the sidebar; provide a button to load them
         if st.button("Load uploaded files"):
             st.session_state.dfs = {}
+            st.session_state.colname_map = {}
             total_mb = 0.0
             files = uploaded if isinstance(uploaded, list) else [uploaded]
             for f in files:
@@ -312,8 +521,13 @@ if upload_mode == "Multiple CSV files" and uploaded:
                     size_mb = len(raw) / (1024 * 1024)
                     total_mb += size_mb
                     try:
+                        # parse once to capture original columns, then sanitize
                         df_full = pd.read_csv(io.BytesIO(raw))
+                        orig_cols = list(df_full.columns)
+                        sanitized = [re.sub(r'[^A-Za-z0-9_]+', '_', c).strip('_') for c in orig_cols]
+                        df_full.columns = sanitized
                         st.session_state.dfs[name] = df_full
+                        st.session_state.colname_map[name] = list(zip(orig_cols, sanitized))
                     except Exception as e:
                         st.warning(f"Failed to parse {name}: {e}")
                 except Exception as e:
@@ -326,7 +540,26 @@ elif upload_mode == "ZIP archive (upload)" and uploaded:
         try:
             uploaded.seek(0)
             zip_bytes = uploaded.read()
-            st.session_state.dfs = extract_csvs_from_zip(zip_bytes)
+            # extract_csvs_from_zip will populate dfs and colname_map
+            st.session_state.dfs = {}
+            st.session_state.colname_map = {}
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+                for info in z.infolist():
+                    if info.is_dir():
+                        continue
+                    if Path(info.filename).suffix.lower() != ".csv":
+                        continue
+                    with z.open(info) as f:
+                        try:
+                            file_bytes = f.read()
+                            df_tmp = pd.read_csv(io.BytesIO(file_bytes))
+                            orig_cols = list(df_tmp.columns)
+                            sanitized = [re.sub(r'[^A-Za-z0-9_]+', '_', c).strip('_') for c in orig_cols]
+                            df_tmp.columns = sanitized
+                            st.session_state.dfs[Path(info.filename).name] = df_tmp
+                            st.session_state.colname_map[Path(info.filename).name] = list(zip(orig_cols, sanitized))
+                        except Exception as e:
+                            st.error(f"Error extracting {info.filename} from ZIP: {e}")
             st.success(f"{len(st.session_state.dfs)} files loaded from ZIP")
             load_trigger = True
         except Exception as e:
@@ -346,6 +579,7 @@ elif upload_mode == "Folder (server)" and not privacy_mode:
                     st.info("No CSV files found in the specified folder.")
                 else:
                     st.session_state.dfs = {}
+                    st.session_state.colname_map = {}
                     total_mb = 0.0
                     for fpath in csv_files:
                         try:
@@ -354,10 +588,14 @@ elif upload_mode == "Folder (server)" and not privacy_mode:
                             if size_mb > MAX_FILE_MB:
                                 st.warning(f"Skipping {fpath.name} - too large ({size_mb:.1f} MB)")
                                 continue
-                            with open(fpath, 'r', encoding='utf-8') as fh:
-                                df = read_csv_fileobj(fh, fpath.name)
-                                if df is not None:
-                                    st.session_state.dfs[fpath.name] = df
+                            # read raw bytes so we capture original headers before sanitizing
+                            raw = fpath.read_bytes()
+                            df_tmp = pd.read_csv(io.BytesIO(raw))
+                            orig_cols = list(df_tmp.columns)
+                            sanitized = [re.sub(r'[^A-Za-z0-9_]+', '_', c).strip('_') for c in orig_cols]
+                            df_tmp.columns = sanitized
+                            st.session_state.dfs[fpath.name] = df_tmp
+                            st.session_state.colname_map[fpath.name] = list(zip(orig_cols, sanitized))
                         except PermissionError:
                             st.warning(f"Permission denied reading {fpath}")
                         except Exception as e:
@@ -385,7 +623,7 @@ else:
             st.session_state['file_selector'] = []
 
     # File picker in main area for convenience. Use a known session key so the select-all/clear buttons can update it.
-    selected = st.multiselect("Select files to include (checked = included)", filenames, default=filenames, key='file_selector')
+    selected = st.multiselect("Select files to include (checked = included)", filenames, key='file_selector')
 
     # Show a compact summary of selection
     st.write(f"{len(selected)} file(s) selected")
@@ -412,15 +650,25 @@ else:
                 st.write(f"Preview of {preview_file} — first 10 rows")
                 st.dataframe(dfp.head(10))
                 st.write(f"Columns: {', '.join(map(str, dfp.columns))}")
+                # show original -> sanitized mapping if available
+                mapping = st.session_state.colname_map.get(preview_file)
+                if mapping:
+                    st.write("Column name mapping (original -> sanitized):")
+                    for orig, san in mapping:
+                        st.write(f"- {orig} -> {san}")
+                # per-file column select convenience
+                if st.button(f"Select columns from {preview_file}"):
+                    st.session_state['col_selector'] = list(dfp.columns)
 
-    # Export raw selected files
+    # --- Export raw selected files ---
     st.markdown("---")
     st.subheader("Export raw files")
-    # use a date-stamped default filename for clarity
+    # keep a date_suffix for summary/export defaults
     date_suffix = datetime.now().strftime("%Y%m%d")
     default_export_name = f"exported_data_{date_suffix}"
-    filename = st.text_input("Output filename (without extension)", default_export_name)
+    filename = st.text_input("Output filename (without extension)", default_export_name, key='raw_filename')
     safe_filename = re.sub(r"[^A-Za-z0-9_.-]", "_", (filename or "").strip())
+
     if st.button("Create Excel from selected files"):
         if not safe_filename:
             st.error("Invalid filename. Use letters, numbers, dot, underscore or hyphen.")
@@ -433,7 +681,12 @@ else:
                     with pd.ExcelWriter(towrite, engine="openpyxl") as writer:
                         for name in selected:
                             sheet_name = Path(name).stem[:31]
-                            dfs[name].to_excel(writer, index=False, sheet_name=sheet_name)
+                            df_to_write = dfs[name]
+                            try:
+                                df_to_write.to_excel(writer, index=False, sheet_name=sheet_name)
+                            except Exception:
+                                # ensure any odd objects are converted to DataFrame
+                                pd.DataFrame(df_to_write).to_excel(writer, index=False, sheet_name=sheet_name)
                     towrite.seek(0)
                     export_bytes = towrite.getvalue()
                 st.success("Export ready — click the download button below")
@@ -453,7 +706,86 @@ else:
     cols_union = sorted({c for df in dfs.values() for c in df.columns}) if dfs else []
     manual_cols = []
     if col_mode.startswith("Select"):
-        manual_cols = st.multiselect("Select columns to include in summary (exact column names)", cols_union, default=[])
+        # allow quick select/clear for columns and store selection in session state
+        if 'col_selector' not in st.session_state:
+            st.session_state['col_selector'] = []
+        ca, cb = st.columns([1, 1])
+        with ca:
+            if st.button("Select all columns"):
+                st.session_state['col_selector'] = cols_union
+        with cb:
+            if st.button("Clear columns"):
+                st.session_state['col_selector'] = []
+        # use session state for the current selection (do not pass default when using the same key)
+        manual_cols = st.multiselect("Select columns to include in summary (exact column names)", cols_union, key='col_selector')
+
+    # Allow derived column definitions: user can define new columns computed from existing ones
+    st.markdown("Derived columns (optional)")
+    st.caption("Define one derived column per line using the format: NAME = op(col1,col2,...). Supported ops: sum, mean, median, ratio, wmean")
+
+    # keep derived defs text in session so example buttons can append templates
+    if 'derived_defs_text' not in st.session_state:
+        st.session_state['derived_defs_text'] = ''
+
+    ex1, ex2, ex3, ex4 = st.columns([1,1,1,1])
+    with ex1:
+        if st.button("Example: TOTAL = sum(A,B)"):
+            cur = st.session_state.get('derived_defs_text','')
+            add = "TOTAL = sum(A,B)"
+            st.session_state['derived_defs_text'] = (cur + "\n" + add).strip()
+    with ex2:
+        if st.button("Example: AVG_AB = mean(A,B)"):
+            cur = st.session_state.get('derived_defs_text','')
+            add = "AVG_AB = mean(A,B)"
+            st.session_state['derived_defs_text'] = (cur + "\n" + add).strip()
+    with ex3:
+        if st.button("Example: W = wmean(A:0.2,B:0.8)"):
+            cur = st.session_state.get('derived_defs_text','')
+            add = "W = wmean(A:0.2,B:0.8)"
+            st.session_state['derived_defs_text'] = (cur + "\n" + add).strip()
+    with ex4:
+        if st.button("Example: R = ratio(sum(A,B), C)"):
+            cur = st.session_state.get('derived_defs_text','')
+            add = "R = ratio(sum(A,B), C)"
+            st.session_state['derived_defs_text'] = (cur + "\n" + add).strip()
+
+    # use session state for derived defs text (do not pass value when using the same key)
+    derived_defs_text = st.text_area("Derived column definitions (one per line)", height=120, key='derived_defs_text')
+    derived_defs, derived_warnings = parse_derived_definitions(derived_defs_text)
+    if derived_warnings:
+        for w in derived_warnings:
+            st.warning(w)
+    if derived_defs:
+        st.write("Parsed derived columns:")
+        for d in derived_defs:
+            try:
+                expr_str = expr_to_str(d.get('expr'))
+            except Exception:
+                expr_str = '<invalid>'
+            st.write(f"- {d.get('name')} = {expr_str}")
+
+    # add preview-evaluate button to show derived results for currently previewed file
+    if show_preview and preview_file and derived_defs:
+        if st.button("Preview derived columns on preview file"):
+            dfp = dfs.get(preview_file)
+            preview_cols = {}
+            eval_errors = []
+            if dfp is not None:
+                for d in derived_defs:
+                    try:
+                        series = evaluate_expr(d.get('expr'), dfp)
+                        if not isinstance(series, pd.Series):
+                            series = pd.Series(series, index=dfp.index)
+                        preview_cols[d['name']] = series
+                    except Exception as e:
+                        eval_errors.append(f"Failed to evaluate {d.get('name')} on {preview_file}: {e}")
+                if preview_cols:
+                    outdf = pd.DataFrame(preview_cols)
+                    st.write(f"Preview of derived columns for {preview_file} (first 10 rows)")
+                    st.dataframe(outdf.head(10))
+                if eval_errors:
+                    for err in eval_errors:
+                        st.error(err)
 
     var_defaults = {
         'EELI': 'eeli',
@@ -476,19 +808,47 @@ else:
             return ''
         return assign_group(ind)
 
-    def process_with_options(dfs_local: Dict[str, pd.DataFrame], chosen_files: List[str], manual_cols: List[str]):
-        """Process only manual column selections. Returns empty DataFrame if no columns selected."""
+    def process_with_options(dfs_local: Dict[str, pd.DataFrame], chosen_files: List[str], manual_cols: List[str], derived_defs: List[Dict]):
+        """Process manual column selections plus computed derived columns.
+
+        Derived definitions are applied per-file to create new temporary columns which are
+        then treated like any selected column when computing mean/std for the summary.
+        Returns empty DataFrame if no columns (manual or derived) are provided.
+        """
         records = []
-        if not manual_cols:
+        if not manual_cols and not derived_defs:
             return pd.DataFrame.from_records(records)
 
         for name in chosen_files:
-            df = dfs_local.get(name)
-            if df is None:
+            df_orig = dfs_local.get(name)
+            if df_orig is None:
                 continue
+
+            # Work on a copy so stored dfs are not mutated
+            try:
+                df = df_orig.copy()
+            except Exception:
+                df = pd.DataFrame(df_orig)
+
+            # Apply derived column definitions (if any) by evaluating ASTs
+            for d in derived_defs:
+                try:
+                    series = evaluate_expr(d.get('expr'), df)
+                    # if the result is a scalar or list-like, ensure it's a Series aligned with df
+                    if not isinstance(series, pd.Series):
+                        series = pd.Series(series, index=df.index)
+                    df[d['name']] = series
+                except Exception as e:
+                    st.warning(f"Failed to compute derived column {d.get('name')} for file {name}: {e}")
+                    continue
+
             meta = parse_filename(name)
             group = get_group_for(meta.get('individual','')) or meta.get('treatment','')
-            for col in manual_cols:
+
+            # Combine manual columns and derived column names for processing
+            cols_to_process = list(dict.fromkeys(list(manual_cols) + [d['name'] for d in derived_defs]))
+
+            for col in cols_to_process:
                 if col not in df.columns:
                     continue
                 ser = pd.to_numeric(df[col], errors='coerce')
@@ -504,6 +864,7 @@ else:
                     'mean': float(ser.mean()),
                     'std': float(ser.std()),
                 })
+
         return pd.DataFrame.from_records(records)
 
     # Summary is only recalculated when user requests it
@@ -513,18 +874,18 @@ else:
     # Only show calculation button when prerequisites are met to reduce accidental clicks
     if not selected:
         st.info("Select one or more files to enable summary calculation.")
-    elif not manual_cols:
-        st.info("No columns selected for summary. Choose columns in 'Select columns manually' mode.")
+    elif not manual_cols and not derived_defs:
+        st.info("No columns selected for summary. Choose columns in 'Select columns manually' mode or define derived columns.")
     else:
         if st.button("Calculate summary for selected files"):
             if not selected:
                 st.error("No files selected for summary calculation.")
-            elif not manual_cols:
-                st.error("No columns selected for summary. Choose columns in 'Select columns manually' mode.")
+            elif not manual_cols and not derived_defs:
+                st.error("No columns selected for summary. Choose columns in 'Select columns manually' mode or define derived columns.")
             else:
                 with st.spinner("Processing files for summary statistics..."):
                     try:
-                        all_summary = process_with_options(dfs, selected, manual_cols)
+                        all_summary = process_with_options(dfs, selected, manual_cols, derived_defs)
                         st.session_state.all_summary = all_summary
                         st.success("Summary statistics calculated")
                     except Exception as e:
