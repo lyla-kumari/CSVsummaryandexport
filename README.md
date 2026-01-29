@@ -150,9 +150,7 @@ When exporting files or summaries the app also supports a user-editable filename
 
 The app sanitises and truncates generated names so they are safe for most filesystems.
 
----
-
-## Custom individual allocation mapping
+### Custom individual allocation mapping
 
 You can override the built-in allocation sets by choosing "Custom" under "Individual allocation mapping" in the sidebar. The UI now accepts arbitrary group names and their member IDs using a single free-form textarea. Enter one group per line with the format:
 
@@ -163,16 +161,12 @@ GROUP_A = L1, L2, L3
 
 Group names are free-form (not limited to IMV/NIV/NIVe/NIVf) and will be used as the `group` value in summaries and export filenames. Definitions are parsed and validated when you click "Save settings" and are stored in the session for subsequent summary calculations. If no custom groups are provided the app falls back to the built-in allocation sets.
 
----
-
 ### Filename regex validation and time cleaning
 
 - When using "Regex (named groups)" mode for filename parsing, the app validates the supplied regular expression when you click "Save settings" and will warn if the regex is invalid.
 - Parsed time tokens are cleaned to remove embedded extensions or trailing suffixes (for example `45min.eit` will be parsed as `45min`) so the `time` field contains only the timepoint part of the filename.
 
----
-
-## Privacy mode and server folder access
+### Privacy mode and server folder access
 
 By default the app runs in privacy mode (data stays local and the app will not access server folders). If you disable privacy mode you may choose the "Folder (server)" upload option to read CSVs from a path on the machine running the app. Folder access is powerful but potentially risky on public/shared servers — the app warns you and requires a confirmation checkbox before enabling server folder scanning.
 
@@ -230,18 +224,6 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 streamlit run app_streamlit.py
-
----
-
-## Developer notes
-
-This release does not include an automated test suite. To validate functionality, run the app locally as described above and verify behavior manually using the UI.
-
-Streamlit compatibility note:
-- The app attempts to call `st.experimental_rerun()` when clearing loaded files. Some Streamlit builds or older versions may not expose that attribute. The app safely falls back by toggling an internal session-state key so clearing files will not raise an exception.
-- If you prefer the automatic rerun behavior and the fallback does not trigger a UI refresh in your environment, upgrade Streamlit in your venv:
-
-   pip install --upgrade streamlit
 
 ---
 
