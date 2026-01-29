@@ -73,6 +73,31 @@ with st.sidebar.form("upload_form"):
         }
 
     col_mode = st.radio("Summary column mode", ["Select columns manually"], index=0)
+
+    # Filename parsing options: allow user to select parsing mode and supply patterns/regex
+    parse_modes = ["Auto (underscore parts)", "Custom pattern (tokens)", "Regex (named groups)"]
+    if 'filename_parse_mode' not in st.session_state:
+        st.session_state['filename_parse_mode'] = parse_modes[0]
+    st.write("Filename parsing")
+    st.caption("Choose how study/individual/treatment/time are extracted from filenames.")
+    filename_parse_mode = st.selectbox("Filename parsing mode", parse_modes, index=parse_modes.index(st.session_state['filename_parse_mode']))
+    st.session_state['filename_parse_mode'] = filename_parse_mode
+
+    # Custom token pattern example: {study}_{individual}_{treatment}_{time}
+    if filename_parse_mode.startswith("Custom"):
+        if 'filename_parse_pattern' not in st.session_state:
+            st.session_state['filename_parse_pattern'] = "{study}_{individual}_{treatment}_{time}"
+        # bind the widget to session state by key only (avoid passing value when session state is set)
+        st.text_input("Custom filename token pattern", key='filename_parse_pattern')
+        st.caption("Use tokens {study} {individual} {treatment} {time} and separators, e.g. {study}_{individual}_{treatment}_{time}. Use Regex mode if tokens may contain separators.")
+
+    # Regex mode: allow named groups like (?P<study>.+?)_(?P<individual>[^_]+)
+    if filename_parse_mode.startswith("Regex"):
+        if 'filename_parse_regex' not in st.session_state:
+            st.session_state['filename_parse_regex'] = r'(?P<study>.+?)_(?P<individual>[^_]+)_(?P<treatment>[^_]+)_(?P<time>[^_]+)'
+        st.text_input("Filename regex (with named groups)", key='filename_parse_regex')
+        st.caption("Provide a regular expression with named groups like (?P<study>...), (?P<individual>...), (?P<treatment>...), (?P<time>...).")
+
     st.form_submit_button("Save settings")
 
 # --- Helpers ---
@@ -93,7 +118,67 @@ def assign_group(ind):
 
 
 def parse_filename(name):
+    """Flexible filename parsing that supports three modes:
+      - Auto (splits on underscores and assigns last parts to individual/treatment/time)
+      - Custom pattern with tokens like {study}_{individual}_{treatment}_{time}
+      - Regex with named groups (?P<study>...)
+
+    The active mode is read from st.session_state['filename_parse_mode'] and patterns from session state keys.
+    Returns a dict with keys: study, individual, treatment, time
+    """
     base = Path(str(name)).stem
+    mode = st.session_state.get('filename_parse_mode', 'Auto (underscore parts)')
+
+    # 1) Regex mode: use user-supplied regex with named groups
+    if mode.startswith('Regex'):
+        pattern = st.session_state.get('filename_parse_regex', '')
+        if pattern:
+            try:
+                m = re.match(pattern, base)
+                if m:
+                    return {
+                        'study': m.groupdict().get('study','') or '',
+                        'individual': m.groupdict().get('individual','') or '',
+                        'treatment': m.groupdict().get('treatment','') or '',
+                        'time': m.groupdict().get('time','') or '',
+                    }
+            except re.error:
+                # invalid regex; fall back to auto
+                pass
+
+    # 2) Custom token pattern: map tokens to parts using separators
+    if mode.startswith('Custom'):
+        pattern = st.session_state.get('filename_parse_pattern', '')
+        if pattern and '{' in pattern:
+            # split pattern into tokens and separators by finding tokens
+            token_names = re.findall(r"\{(study|individual|treatment|time)\}", pattern)
+            # build a simple split based on non-token separators in the pattern
+            # e.g. pattern {study}_{individual}_{treatment}_{time} -> separator '_'
+            # This is best-effort and will fall back to auto if parsing fails
+            seps = re.split(r"\{(?:study|individual|treatment|time)\}", pattern)
+            # find a single non-empty separator to split on
+            sep = None
+            for s in seps:
+                if s:
+                    sep = s
+                    break
+            if sep is None:
+                sep = '_'
+            parts = base.split(sep)
+            if len(parts) >= len(token_names):
+                mapping = {}
+                # map token positions to parts (left-to-right)
+                for i, tok in enumerate(token_names):
+                    mapping[tok] = parts[i] if i < len(parts) else ''
+                return {
+                    'study': mapping.get('study','') or '',
+                    'individual': mapping.get('individual','') or '',
+                    'treatment': mapping.get('treatment','') or '',
+                    'time': mapping.get('time','') or '',
+                }
+            # else fall through to auto
+
+    # 3) Auto mode: split on underscores and assume last 3 tokens are individual,treatment,time
     parts = base.split('_')
     study = '_'.join(parts[:-3]) if len(parts) >= 4 else parts[0]
     individual = parts[-3] if len(parts) >= 4 else ''
@@ -494,6 +579,66 @@ def expr_to_str(node):
             parts = [expr_to_str(a) for a in node.get('args', [])]
             return f"{name}({', '.join(parts)})"
     return ''
+
+
+def build_filename_from_pattern(pattern: str, selected_files: List[str], dfs_local: Dict[str, pd.DataFrame], default_prefix: str, index: int = 1) -> str:
+    """Build a sanitized filename (without extension) from a user-editable pattern.
+
+    Supported tokens:
+      {date}      - current date YYYYMMDD
+      {datetime}  - current datetime YYYYMMDD_HHMMSS
+      {prefix}    - fallback prefix (usually default_export_name or default_summary)
+      {study}     - parsed study from the first selected file name
+      {individual}- parsed individual from the first selected file name
+      {treatment} - parsed treatment from the first selected file name
+      {time}      - parsed time from the first selected file name
+      {group}     - derived group for the first selected file (if available)
+      {firstfile} - stem (no ext) of the first selected file
+      {count}     - number of selected files
+      {index}     - numeric index (useful for multiple outputs)
+
+    The result is sanitized to allow only letters, numbers, dot, underscore and hyphen.
+    """
+    # prepare meta from first selected file (if present)
+    meta = {'study': '', 'individual': '', 'treatment': '', 'time': ''}
+    group = ''
+    firstfile = ''
+    try:
+        if selected_files:
+            first = selected_files[0]
+            firstfile = Path(first).stem
+            meta = parse_filename(first) or meta
+            # attempt to determine group using custom sets if present; rely on get_group_for if available
+            try:
+                group = get_group_for(meta.get('individual',''))
+            except Exception:
+                group = assign_group(meta.get('individual',''))
+    except Exception:
+        pass
+
+    tokens = {
+        'date': datetime.now().strftime('%Y%m%d'),
+        'datetime': datetime.now().strftime('%Y%m%d_%H%M%S'),
+        'prefix': default_prefix or '',
+        'study': meta.get('study','') or '',
+        'individual': meta.get('individual','') or '',
+        'treatment': meta.get('treatment','') or '',
+        'time': meta.get('time','') or '',
+        'group': group or '',
+        'firstfile': firstfile or '',
+        'count': str(len(selected_files) if selected_files else 0),
+        'index': str(index),
+    }
+
+    result = str(pattern or '')
+    for k, v in tokens.items():
+        result = result.replace('{' + k + '}', str(v))
+
+    # collapse multiple underscores/spaces and sanitize
+    result = re.sub(r'\s+', '_', result)
+    safe = re.sub(r'[^A-Za-z0-9_.-]', '_', result).strip('_')
+    # limit length to reasonable filesystem-friendly size
+    return safe[:120]
 
 
 # --- Data loading: explicit action ---
@@ -927,3 +1072,134 @@ else:
         st.session_state.dfs = {}
         st.session_state.all_summary = pd.DataFrame()
         st.experimental_rerun()
+
+    # add UI: column name mappings so users can map equivalent names across files
+    st.markdown("Column name mappings (optional)")
+    st.caption("Define mappings so different column names from different files are treated as the same. Use the format: CANONICAL = alias1, alias2, ...\nExample: EELI = eeli, EEL_I")
+    if 'col_mappings_text' not in st.session_state:
+        st.session_state['col_mappings_text'] = ''
+
+    ex_map, ex_map2 = st.columns([1,3])
+    with ex_map:
+        if st.button("Example mapping: EELI = eeli, EEL_I"):
+            cur = st.session_state.get('col_mappings_text','')
+            add = "EELI = eeli, EEL_I"
+            st.session_state['col_mappings_text'] = (cur + "\n" + add).strip()
+    with ex_map2:
+        st.write("")
+
+    col_mappings_text = st.text_area("Column mappings (one per line)", key='col_mappings_text', height=100)
+
+    def parse_col_mappings(text: str):
+        """Parse lines like: CANON = alias1, alias2 -> returns dict canon -> set(aliases)
+        Canonical name is included in its alias set for matching convenience."""
+        out = {}
+        if not text:
+            return out
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            line = line.strip()
+            if not line:
+                continue
+            m = re.match(r'^\s*([^=]+?)\s*=\s*(.+)$', line)
+            if not m:
+                # ignore malformed lines
+                continue
+            canon = m.group(1).strip()
+            rhs = m.group(2).strip()
+            aliases = [a.strip() for a in re.split(r'[,;]\\s*|[,\\s]+' , rhs) if a.strip()]
+            aliases = {a for a in aliases}
+            aliases.add(canon)
+            out[canon] = aliases
+        return out
+
+    # parsed mappings and reverse lookup (alias_lower -> canonical)
+    user_col_mappings = parse_col_mappings(st.session_state.get('col_mappings_text',''))
+    _col_alias_to_canon = {}
+    for canon, aliases in user_col_mappings.items():
+        for a in aliases:
+            _col_alias_to_canon[a.lower()] = canon
+
+    # --- apply column mappings to loaded data ---
+    if st.button("Apply column mappings to loaded data"):
+        if not dfs:
+            st.warning("No data loaded. Please load CSV files or a ZIP archive first.")
+        else:
+            # collect all columns needing mapping
+            all_cols = set()
+            for df in dfs.values():
+                all_cols.update(df.columns)
+            all_cols = sorted(list(all_cols))
+
+            # preview: which columns will be affected?
+            preview_map = {}
+            for canon, aliases in user_col_mappings.items():
+                matched = [a for a in aliases if a in all_cols]
+                if matched:
+                    preview_map[canon] = matched
+
+            st.write("Columns affected by mappings:")
+            if not preview_map:
+                st.write("No columns will be affected by the current mappings.")
+            else:
+                for canon, matched in preview_map.items():
+                    st.write(f"- {canon} = {', '.join(matched)}")
+
+            # confirm and apply mappings
+            if st.button("Confirm and apply mappings"):
+                # remap columns in each DataFrame
+                for name, df in dfs.items():
+                    try:
+                        # create a mapping from current column names to new names
+                        # apply user mappings: for each canonical name, find aliases present in this df
+                        for canon, aliases in user_col_mappings.items():
+                            # sanitize canonical to match sanitized column style
+                            san_canon = re.sub(r'[^A-Za-z0-9_]+', '_', canon).strip('_')
+                            # ensure we don't inadvertently overwrite derived columns
+                            for alias in sorted(list(aliases)):
+                                # try to find a matching column in df for this alias
+                                matched = find_column(df, [alias, canon])
+                                if not matched:
+                                    # also try case-insensitive exact match
+                                    for c in df.columns:
+                                        if c.lower() == alias.lower() or c.lower() == san_canon.lower():
+                                            matched = c
+                                            break
+                                if not matched:
+                                    continue
+                                if matched == san_canon or matched == canon:
+                                    # already has canonical column
+                                    continue
+                                # if canonical column not present, create it; otherwise merge
+                                target = san_canon if san_canon in df.columns else canon if canon in df.columns else san_canon
+                                # create/merge preserving existing values (prefer existing canonical non-null)
+                                try:
+                                    if target not in df.columns:
+                                        df[target] = df[matched]
+                                    else:
+                                        df[target] = df[target].fillna(df[matched])
+                                except Exception:
+                                    # fallback: assign directly
+                                    df[target] = df[matched]
+                                # drop the alias column if it's different from the target
+                                if matched != target and matched in df.columns:
+                                    try:
+                                        df = df.drop(columns=[matched])
+                                    except Exception:
+                                        pass
+                                # update column name mapping if available
+                                cmap = st.session_state.get('colname_map', {}).get(name, [])
+                                new_cmap = []
+                                for orig, san in cmap:
+                                    if san == matched:
+                                        new_cmap.append((orig, target))
+                                    else:
+                                        new_cmap.append((orig, san))
+                                if name in st.session_state.get('colname_map', {}):
+                                    st.session_state['colname_map'][name] = new_cmap
+                        # ensure updated dataframe stored back
+                        st.session_state['dfs'][name] = df
+                    except Exception as e:
+                        st.warning(f"Failed to apply mappings to {name}: {e}")
+                st.success("Column mappings applied to loaded data")
+                # refresh local dfs reference
+                dfs = st.session_state.get('dfs', {})
