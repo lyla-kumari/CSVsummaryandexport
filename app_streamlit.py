@@ -1049,7 +1049,17 @@ else:
     if st.button("Clear loaded files"):
         st.session_state.dfs = {}
         st.session_state.all_summary = pd.DataFrame()
-        st.experimental_rerun()
+        # Try to trigger a rerun; fall back gracefully if the Streamlit version lacks experimental_rerun
+        try:
+            st.experimental_rerun()
+        except AttributeError:
+            # Some Streamlit builds do not expose experimental_rerun. Toggle a session-state key
+            # to force Streamlit to notice a state change which typically causes a rerun.
+            try:
+                st.session_state['_rerun_toggle'] = not st.session_state.get('_rerun_toggle', False)
+            except Exception:
+                # As a last resort, inform the user — do not raise an exception
+                st.info("Files cleared. Please refresh the app to see the changes.")
 
     # add UI: column name mappings so users can map equivalent names across files
     st.markdown("Column name mappings (optional)")

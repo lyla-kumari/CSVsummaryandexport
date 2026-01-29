@@ -95,3 +95,26 @@ TOTAL_VOL = sum(VolumeA, VolumeB)
 
 
 End of manual.
+
+---
+
+Troubleshooting: experimental rerun
+
+When you click "Clear loaded files" the app attempts to trigger a Streamlit rerun. Some Streamlit builds or older versions may not expose `st.experimental_rerun()`, which previously caused an AttributeError. The app now falls back to toggling an internal session-state key to trigger a rerun.
+
+If clearing files appears to not refresh the UI in your environment, try one of the following:
+
+- Refresh your browser page manually.
+- Upgrade Streamlit in your virtual environment:
+
+  pip install --upgrade streamlit
+
+- If you cannot upgrade, the fallback still clears files but may require a manual refresh to update the UI. This is safe and does not affect your data.
+
+---
+
+Automated tests
+
+This distribution does not include automated tests. Verify functionality by running the app locally and using the UI to exercise features.
+
+End of manual.
