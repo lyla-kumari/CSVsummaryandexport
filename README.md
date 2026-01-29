@@ -164,7 +164,19 @@ The app sanitises and truncates generated names so they are safe for most filesy
 
 ### Custom individual allocation mapping
 
-A new option in the sidebar lets you override the default group membership mapping. Choose "Custom" under "Individual allocation mapping" and enter comma-separated IDs for each group (for example `L1,L2,L3`). These custom sets are used when determining the `group` for each file in summaries and exports. If no custom mapping is provided the app falls back to built-in allocation sets.
+You can override the built-in allocation sets by choosing "Custom" under "Individual allocation mapping" in the sidebar. The UI now accepts arbitrary group names and their member IDs using a single free-form textarea. Enter one group per line with the format:
+
+GROUP_NAME = ID1, ID2, ID3
+
+Example:
+GROUP_A = L1, L2, L3
+
+Group names are free-form (not limited to IMV/NIV/NIVe/NIVf) and will be used as the `group` value in summaries and export filenames. Definitions are parsed and validated when you click "Save settings" and are stored in the session for subsequent summary calculations. If no custom groups are provided the app falls back to the built-in allocation sets.
+
+### Filename regex validation and time cleaning
+
+- When using "Regex (named groups)" mode for filename parsing, the app validates the supplied regular expression when you click "Save settings" and will warn if the regex is invalid.
+- Parsed time tokens are cleaned to remove embedded extensions or trailing suffixes (for example `45min.eit` will be parsed as `45min`) so the `time` field contains only the timepoint part of the filename.
 
 ### Privacy mode and server folder access
 

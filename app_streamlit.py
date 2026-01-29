@@ -58,19 +58,28 @@ with st.sidebar.form("upload_form"):
     alloc_choice = st.selectbox("Individual allocation mapping", ["Default", "Custom"], index=0)
     custom_sets = None
     if alloc_choice == "Custom":
-        st.info("Enter comma-separated individual IDs (e.g. L1,L2) for each group")
-        imv_txt = st.text_area("IMV members (comma-separated)", value="")
-        niv_txt = st.text_area("NIV members (comma-separated)", value="")
-        nive_txt = st.text_area("NIVe members (comma-separated)", value="")
-        nivf_txt = st.text_area("NIVf members (comma-separated)", value="")
-        def parse_members(s):
-            return {x.strip().upper() for x in re.split(r'[,\s]+', s) if x.strip()} if s else set()
-        custom_sets = {
-            'IMV': parse_members(imv_txt),
-            'NIV': parse_members(niv_txt),
-            'NIVe': parse_members(nive_txt),
-            'NIVf': parse_members(nivf_txt),
-        }
+        st.info("Define groups and their member IDs (one group per line). Format: GROUP = ID1, ID2, ...")
+        custom_sets_text = st.text_area("Custom group definitions (one per line)", value="")
+        def parse_alloc(text: str):
+            out = {}
+            if not text:
+                return out
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                m = re.match(r'^\s*([^=]+?)\s*=\s*(.+)$', line)
+                if not m:
+                    continue
+                gname = m.group(1).strip()
+                rhs = m.group(2).strip()
+                members = {x.strip().upper() for x in re.split(r'[,\s]+' , rhs) if x.strip()}
+                if members:
+                    out[gname] = members
+            return out
+        custom_sets = parse_alloc(custom_sets_text)
+        if not custom_sets:
+            st.warning("No valid custom groups parsed yet. Use the format: GROUP = L1,L2,...")
 
     col_mode = st.radio("Summary column mode", ["Select columns manually"], index=0)
 
@@ -87,7 +96,6 @@ with st.sidebar.form("upload_form"):
     if filename_parse_mode.startswith("Custom"):
         if 'filename_parse_pattern' not in st.session_state:
             st.session_state['filename_parse_pattern'] = "{study}_{individual}_{treatment}_{time}"
-        # bind the widget to session state by key only (avoid passing value when session state is set)
         st.text_input("Custom filename token pattern", key='filename_parse_pattern')
         st.caption("Use tokens {study} {individual} {treatment} {time} and separators, e.g. {study}_{individual}_{treatment}_{time}. Use Regex mode if tokens may contain separators.")
 
@@ -98,7 +106,23 @@ with st.sidebar.form("upload_form"):
         st.text_input("Filename regex (with named groups)", key='filename_parse_regex')
         st.caption("Provide a regular expression with named groups like (?P<study>...), (?P<individual>...), (?P<treatment>...), (?P<time>...).")
 
-    st.form_submit_button("Save settings")
+    saved = st.form_submit_button("Save settings")
+    if saved:
+        # validate regex early so users get feedback
+        if st.session_state.get('filename_parse_mode','').startswith('Regex'):
+            pat = st.session_state.get('filename_parse_regex','')
+            if pat:
+                try:
+                    re.compile(pat)
+                except re.error as e:
+                    st.warning(f"Filename regex invalid: {e}")
+        # ensure custom_sets is stored in session state so it's accessible elsewhere
+        if alloc_choice == 'Custom':
+            st.session_state['custom_sets_text'] = custom_sets_text
+            st.session_state['custom_sets'] = custom_sets
+        else:
+            st.session_state['custom_sets_text'] = ''
+            st.session_state['custom_sets'] = {}
 
 # --- Helpers ---
 IMV = {'L14','L16','L18','L33','L35','L39','L43','L47','L49','L55','L61','L63','L68','L69','L70'}
@@ -110,6 +134,15 @@ NIVf = {'L2','L17','L19','L31','L46','L54','L56'}
 
 def assign_group(ind):
     ind = str(ind).upper()
+    # prefer user-specified custom sets (allowing arbitrary group names)
+    try:
+        if custom_sets:
+            for gname, s in custom_sets.items():
+                if ind in s:
+                    return gname
+    except Exception:
+        pass
+    # legacy hard-coded sets as fallback
     if ind in IMV: return 'IMV'
     if ind in NIV: return 'NIV'
     if ind in NIVe: return 'NIVe'
@@ -118,72 +151,56 @@ def assign_group(ind):
 
 
 def parse_filename(name):
-    """Flexible filename parsing that supports three modes:
-      - Auto (splits on underscores and assigns last parts to individual/treatment/time)
-      - Custom pattern with tokens like {study}_{individual}_{treatment}_{time}
-      - Regex with named groups (?P<study>...)
-
-    The active mode is read from st.session_state['filename_parse_mode'] and patterns from session state keys.
-    Returns a dict with keys: study, individual, treatment, time
-    """
     base = Path(str(name)).stem
     mode = st.session_state.get('filename_parse_mode', 'Auto (underscore parts)')
 
-    # 1) Regex mode: use user-supplied regex with named groups
+    def _clean_time(s: str) -> str:
+        if not s:
+            return ''
+        s = str(s).strip()
+        # remove anything after a dot (handles filenames like '..._45min.eit.csv')
+        if '.' in s:
+            s = s.split('.')[0]
+        return s
+
     if mode.startswith('Regex'):
         pattern = st.session_state.get('filename_parse_regex', '')
         if pattern:
             try:
                 m = re.match(pattern, base)
                 if m:
+                    gd = m.groupdict()
                     return {
-                        'study': m.groupdict().get('study','') or '',
-                        'individual': m.groupdict().get('individual','') or '',
-                        'treatment': m.groupdict().get('treatment','') or '',
-                        'time': m.groupdict().get('time','') or '',
+                        'study': gd.get('study','') or '',
+                        'individual': gd.get('individual','') or '',
+                        'treatment': gd.get('treatment','') or '',
+                        'time': _clean_time(gd.get('time','') or ''),
                     }
             except re.error:
-                # invalid regex; fall back to auto
                 pass
 
-    # 2) Custom token pattern: map tokens to parts using separators
     if mode.startswith('Custom'):
         pattern = st.session_state.get('filename_parse_pattern', '')
         if pattern and '{' in pattern:
-            # split pattern into tokens and separators by finding tokens
             token_names = re.findall(r"\{(study|individual|treatment|time)\}", pattern)
-            # build a simple split based on non-token separators in the pattern
-            # e.g. pattern {study}_{individual}_{treatment}_{time} -> separator '_'
-            # This is best-effort and will fall back to auto if parsing fails
             seps = re.split(r"\{(?:study|individual|treatment|time)\}", pattern)
-            # find a single non-empty separator to split on
-            sep = None
-            for s in seps:
-                if s:
-                    sep = s
-                    break
-            if sep is None:
-                sep = '_'
+            sep = next((s for s in seps if s), '_')
             parts = base.split(sep)
             if len(parts) >= len(token_names):
-                mapping = {}
-                # map token positions to parts (left-to-right)
-                for i, tok in enumerate(token_names):
-                    mapping[tok] = parts[i] if i < len(parts) else ''
+                mapping = {tok: (parts[i] if i < len(parts) else '') for i, tok in enumerate(token_names)}
                 return {
                     'study': mapping.get('study','') or '',
                     'individual': mapping.get('individual','') or '',
                     'treatment': mapping.get('treatment','') or '',
-                    'time': mapping.get('time','') or '',
+                    'time': _clean_time(mapping.get('time','') or ''),
                 }
-            # else fall through to auto
 
-    # 3) Auto mode: split on underscores and assume last 3 tokens are individual,treatment,time
     parts = base.split('_')
     study = '_'.join(parts[:-3]) if len(parts) >= 4 else parts[0]
     individual = parts[-3] if len(parts) >= 4 else ''
     treatment = parts[-2] if len(parts) >= 4 else ''
     time = parts[-1] if len(parts) >= 4 else ''
+    time = _clean_time(time)
     return {'study': study, 'individual': individual, 'treatment': treatment, 'time': time}
 
 
@@ -289,14 +306,8 @@ def process_files_simple(dfs_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def export_summary_excel(all_df: pd.DataFrame) -> bytes:
-    """Export the summary workbook using the same layout as the original export function.
-    For each variable present in all_df, create a sheet with group means and std tables
-    written side-by-side, with groups as top-level columns and individuals as sub-columns.
-    """
-    # determine variables in the order they appear
     vars = [v for v in list(dict.fromkeys(all_df.get('variable', pd.Series()).tolist())) if v]
     if not vars:
-        # fallback to default set if none found
         vars = ['EELI','CoV(H)','CoV(V)']
 
     out = io.BytesIO()
@@ -321,7 +332,6 @@ def export_summary_excel(all_df: pd.DataFrame) -> bytes:
             except Exception:
                 pass
 
-            # if both pivots empty, write an empty sheet
             if (mean_pivot.empty if hasattr(mean_pivot, 'empty') else True) and (std_pivot.empty if hasattr(std_pivot, 'empty') else True):
                 pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
                 continue
@@ -378,11 +388,6 @@ def export_summary_excel(all_df: pd.DataFrame) -> bytes:
 
 
 def parse_derived_definitions(text: str):
-    """Parse derived column definitions from text input into ASTs and validate weights.
-
-    Returns a tuple (defs, warnings) where defs is a list of dicts {'name','expr'} and
-    warnings is a list of human-readable warning messages.
-    """
     defs = []
     warnings = []
     if not text:
@@ -420,10 +425,8 @@ def parse_derived_definitions(text: str):
 
     def parse_expr(s: str):
         s = s.strip()
-        # numeric literal
         if re.fullmatch(r'[+-]?\d+(?:\.\d+)?', s):
             return {'type': 'const', 'value': float(s)}
-        # function call
         m = re.fullmatch(r'([A-Za-z_]\w*)\s*\((.*)\)', s)
         if m:
             fname = m.group(1).lower()
@@ -452,7 +455,6 @@ def parse_derived_definitions(text: str):
             if fname in ('wmean', 'weightedmean', 'wweightedmean'):
                 return {'type': 'wmean', 'parts': args}
             return {'type': 'func', 'name': fname, 'args': [a['node'] for a in args], 'raw_args': args}
-        # otherwise identifier (column name)
         return {'type': 'col', 'name': s}
 
     for lineno, line in enumerate(text.splitlines(), start=1):
@@ -475,7 +477,6 @@ def parse_derived_definitions(text: str):
 
 
 def evaluate_expr(node, df: pd.DataFrame):
-    """Evaluate an expression AST node against a dataframe and return a pandas Series."""
     if node is None:
         return pd.Series([np.nan] * len(df), index=df.index)
     ntype = node.get('type')
@@ -485,7 +486,6 @@ def evaluate_expr(node, df: pd.DataFrame):
         col = node.get('name')
         if col in df.columns:
             return pd.to_numeric(df[col], errors='coerce')
-        # missing column -> all NaN
         return pd.Series([np.nan] * len(df), index=df.index)
     if ntype == 'func':
         name = node.get('name')
@@ -511,10 +511,8 @@ def evaluate_expr(node, df: pd.DataFrame):
                 return pd.Series([np.nan] * len(df), index=df.index)
             num = series_args[0]
             den = series_args[1]
-            # avoid division by zero
             den_safe = den.replace(0, np.nan)
             return num.divide(den_safe)
-        # unknown function -> return NaN series
         return pd.Series([np.nan] * len(df), index=df.index)
     if ntype == 'wmean':
         parts = node.get('parts', [])
@@ -526,7 +524,6 @@ def evaluate_expr(node, df: pd.DataFrame):
             subnode = p.get('node')
             weight = p.get('weight')
             if weight is None:
-                # default weight 1.0
                 weight = 1.0
             try:
                 s = evaluate_expr(subnode, df)
@@ -536,10 +533,8 @@ def evaluate_expr(node, df: pd.DataFrame):
             valid_mask = ~s.isna()
             numer += s_num * float(weight)
             denom += valid_mask.astype(float) * float(weight)
-        # avoid divide by zero
         denom_safe = denom.replace(0, np.nan)
         return numer.divide(denom_safe)
-    # fallback
     return pd.Series([np.nan] * len(df), index=df.index)
 
 
@@ -582,24 +577,6 @@ def expr_to_str(node):
 
 
 def build_filename_from_pattern(pattern: str, selected_files: List[str], dfs_local: Dict[str, pd.DataFrame], default_prefix: str, index: int = 1) -> str:
-    """Build a sanitized filename (without extension) from a user-editable pattern.
-
-    Supported tokens:
-      {date}      - current date YYYYMMDD
-      {datetime}  - current datetime YYYYMMDD_HHMMSS
-      {prefix}    - fallback prefix (usually default_export_name or default_summary)
-      {study}     - parsed study from the first selected file name
-      {individual}- parsed individual from the first selected file name
-      {treatment} - parsed treatment from the first selected file name
-      {time}      - parsed time from the first selected file name
-      {group}     - derived group for the first selected file (if available)
-      {firstfile} - stem (no ext) of the first selected file
-      {count}     - number of selected files
-      {index}     - numeric index (useful for multiple outputs)
-
-    The result is sanitized to allow only letters, numbers, dot, underscore and hyphen.
-    """
-    # prepare meta from first selected file (if present)
     meta = {'study': '', 'individual': '', 'treatment': '', 'time': ''}
     group = ''
     firstfile = ''
@@ -608,7 +585,6 @@ def build_filename_from_pattern(pattern: str, selected_files: List[str], dfs_loc
             first = selected_files[0]
             firstfile = Path(first).stem
             meta = parse_filename(first) or meta
-            # attempt to determine group using custom sets if present; rely on get_group_for if available
             try:
                 group = get_group_for(meta.get('individual',''))
             except Exception:
@@ -634,10 +610,8 @@ def build_filename_from_pattern(pattern: str, selected_files: List[str], dfs_loc
     for k, v in tokens.items():
         result = result.replace('{' + k + '}', str(v))
 
-    # collapse multiple underscores/spaces and sanitize
     result = re.sub(r'\s+', '_', result)
     safe = re.sub(r'[^A-Za-z0-9_.-]', '_', result).strip('_')
-    # limit length to reasonable filesystem-friendly size
     return safe[:120]
 
 
@@ -954,12 +928,6 @@ else:
         return assign_group(ind)
 
     def process_with_options(dfs_local: Dict[str, pd.DataFrame], chosen_files: List[str], manual_cols: List[str], derived_defs: List[Dict]):
-        """Process manual column selections plus computed derived columns.
-
-        Derived definitions are applied per-file to create new temporary columns which are
-        then treated like any selected column when computing mean/std for the summary.
-        Returns empty DataFrame if no columns (manual or derived) are provided.
-        """
         records = []
         if not manual_cols and not derived_defs:
             return pd.DataFrame.from_records(records)
@@ -1091,8 +1059,6 @@ else:
     col_mappings_text = st.text_area("Column mappings (one per line)", key='col_mappings_text', height=100)
 
     def parse_col_mappings(text: str):
-        """Parse lines like: CANON = alias1, alias2 -> returns dict canon -> set(aliases)
-        Canonical name is included in its alias set for matching convenience."""
         out = {}
         if not text:
             return out
@@ -1102,7 +1068,6 @@ else:
                 continue
             m = re.match(r'^\s*([^=]+?)\s*=\s*(.+)$', line)
             if not m:
-                # ignore malformed lines
                 continue
             canon = m.group(1).strip()
             rhs = m.group(2).strip()
