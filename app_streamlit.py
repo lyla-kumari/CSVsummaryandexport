@@ -62,7 +62,7 @@ with st.sidebar.form("upload_form"):
         else:
             st.info("Folder access is disabled until you confirm the privacy implications.")
 
-    MAX_FILE_MB = 100
+    MAX_FILE_MB = 300
 
     st.markdown("---")
     st.header("Summary options")
@@ -137,7 +137,6 @@ with st.sidebar.form("upload_form"):
 
 # --- Helpers ---
 IMV = {'L14','L16','L18','L33','L35','L39','L43','L47','L49','L55','L61','L63','L68','L69','L70'}
-# fixed duplicate 'L59'
 NIV = {'L1','L7','L9','L13','L20','L22','L30','L34','L44','L45','L51','L57','L59','L65','L67'}
 NIVe = {'L8','L12','L15','L23','L32','L36','L38','L40','L48','L52','L58','L60','L62','L66'}
 NIVf = {'L2','L17','L19','L31','L46','L54','L56'}

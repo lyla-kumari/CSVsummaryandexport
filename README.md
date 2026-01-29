@@ -14,20 +14,6 @@
 Export App is a simple data export and summary tool for CSV files.  
 It allows users to upload multiple CSV files (or a ZIP of CSVs), preview their contents, export raw data into Excel, and calculate basic summary statistics (mean and standard deviation).
 
-No programming knowledge is required.
-
----
-
-## Key additions in v1.1
-
-- Derived column definitions: create new temporary columns for summary calculations using simple expressions (sum, mean, median, ratio, weighted mean).
-- Preview derived columns per-file before running a summary to validate expressions and values.
-- Column name mapping display: the app shows original header → sanitized header mapping after loading files so you can use correct names in expressions.
-- Column selection conveniences: select-all / clear buttons and a "Select columns from <file>" shortcut in the preview pane.
-- Example templates for derived definitions are auto-populated using detected column names to make it easy to try expressions.
-- Improved parser warnings and evaluation error messages to help diagnose expression problems.
-- Session persistence for derived text and column selections so settings survive reruns.
-
 ---
 
 ## Features
