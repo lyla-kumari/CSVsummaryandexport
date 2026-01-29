@@ -138,6 +138,40 @@ Export to CSV
 
 ---
 
+### Filename parsing & export filename tokens
+
+The app provides flexible filename parsing to extract study, individual, treatment and time information from file names. You can choose the parsing mode in the sidebar:
+
+- Auto (underscore parts): splits the file stem on underscores and assigns the last three parts to individual, treatment and time (the remainder is treated as study).
+- Custom pattern (tokens): use a token template like `{study}_{individual}_{treatment}_{time}` to map parts directly.
+- Regex (named groups): provide a regular expression with named groups such as `(?P<study>...)`, `(?P<individual>...)`, `(?P<treatment>...)`, `(?P<time>...)` for full control over parsing.
+
+When exporting files or summaries the app also supports a user-editable filename pattern with tokens. Supported tokens are:
+
+- `{date}`      - current date YYYYMMDD
+- `{datetime}`  - current datetime YYYYMMDD_HHMMSS
+- `{prefix}`    - fallback prefix (usually default_export_name or default_summary)
+- `{study}`     - parsed study from the first selected file name
+- `{individual}`- parsed individual from the first selected file name
+- `{treatment}` - parsed treatment from the first selected file name
+- `{time}`      - parsed time from the first selected file name
+- `{group}`     - derived group for the first selected file (if available)
+- `{firstfile}` - stem (no ext) of the first selected file
+- `{count}`     - number of selected files
+- `{index}`     - numeric index (useful for multiple outputs)
+
+The app sanitises and truncates generated names so they are safe for most filesystems.
+
+### Custom individual allocation mapping
+
+A new option in the sidebar lets you override the default group membership mapping. Choose "Custom" under "Individual allocation mapping" and enter comma-separated IDs for each group (for example `L1,L2,L3`). These custom sets are used when determining the `group` for each file in summaries and exports. If no custom mapping is provided the app falls back to built-in allocation sets.
+
+### Privacy mode and server folder access
+
+By default the app runs in privacy mode (data stays local and the app will not access server folders). If you disable privacy mode you may choose the "Folder (server)" upload option to read CSVs from a path on the machine running the app. Folder access is powerful but potentially risky on public/shared servers — the app warns you and requires a confirmation checkbox before enabling server folder scanning.
+
+---
+
 ## Additional notes & troubleshooting
 
 - Column sanitization: headers are converted to letters, numbers and underscores only; see the mapping in the preview to find the correct names for expressions.
