@@ -67,6 +67,51 @@ with st.sidebar.form("upload_form"):
 
     st.markdown("---")
     st.header("Summary options")
+
+    # --- Grouping override (how the 'group' column is created for summary) ---
+    st.subheader("Grouping")
+    st.caption("Choose how the 'group' column is determined for the summary, especially when filenames are missing individual/treatment.")
+    if 'group_source' not in st.session_state:
+        st.session_state['group_source'] = "Auto (individual → mapping, else treatment)"
+    group_source = st.selectbox(
+        "Group source",
+        [
+            "Auto (individual → mapping, else treatment)",
+            "From filename: individual",
+            "From filename: treatment",
+            "From filename: study",
+            "From filename: time",
+            "Fixed value (manual)",
+        ],
+        index=[
+            "Auto (individual → mapping, else treatment)",
+            "From filename: individual",
+            "From filename: treatment",
+            "From filename: study",
+            "From filename: time",
+            "Fixed value (manual)",
+        ].index(st.session_state['group_source']) if st.session_state['group_source'] in [
+            "Auto (individual → mapping, else treatment)",
+            "From filename: individual",
+            "From filename: treatment",
+            "From filename: study",
+            "From filename: time",
+            "Fixed value (manual)",
+        ] else 0,
+    )
+    st.session_state['group_source'] = group_source
+
+    if 'group_fixed_value' not in st.session_state:
+        st.session_state['group_fixed_value'] = "UNKNOWN"
+    if group_source == "Fixed value (manual)":
+        st.text_input("Group value", key='group_fixed_value')
+        st.caption("Used for every row in the summary.")
+
+    if 'group_fallback_value' not in st.session_state:
+        st.session_state['group_fallback_value'] = ""
+    st.text_input("Fallback group (optional)", key='group_fallback_value')
+    st.caption("If the chosen group source is blank for a file, use this value instead (leave empty to allow blanks).")
+
     alloc_choice = st.selectbox("Individual allocation mapping", ["Default", "Custom"], index=0)
     custom_sets = None
     if alloc_choice == "Custom":
@@ -863,6 +908,32 @@ else:
             return ''
         return assign_group(ind)
 
+    def compute_group_value(meta: Dict[str, str]) -> str:
+        """Compute the summary 'group' based on user override settings."""
+        source = st.session_state.get('group_source', "Auto (individual → mapping, else treatment)")
+        fallback = (st.session_state.get('group_fallback_value', '') or '').strip()
+
+        group_val = ''
+        if source == "From filename: individual":
+            group_val = (meta.get('individual', '') or '').strip()
+        elif source == "From filename: treatment":
+            group_val = (meta.get('treatment', '') or '').strip()
+        elif source == "From filename: study":
+            group_val = (meta.get('study', '') or '').strip()
+        elif source == "From filename: time":
+            group_val = (meta.get('time', '') or '').strip()
+        elif source == "Fixed value (manual)":
+            group_val = (st.session_state.get('group_fixed_value', '') or '').strip()
+        else:
+            # Auto: prefer mapped/assigned group from individual, else treatment
+            group_val = (get_group_for(meta.get('individual', '')) or '').strip()
+            if not group_val:
+                group_val = (meta.get('treatment', '') or '').strip()
+
+        if not group_val and fallback:
+            group_val = fallback
+        return group_val
+
     def process_with_options(dfs_local: Dict[str, pd.DataFrame], chosen_files: List[str], manual_cols: List[str], derived_defs: List[Dict]):
         records = []
         if not manual_cols and not derived_defs:
@@ -892,12 +963,7 @@ else:
                     continue
 
             meta = parse_filename(name)
-            # Grouping rule:
-            # 1) If a custom/default allocation mapping assigns a group, use it.
-            # 2) Otherwise, group by the individual ID (so single-patient datasets don't end up with blank groups).
-            group = get_group_for(meta.get('individual', ''))
-            if not group:
-                group = (meta.get('individual', '') or '').strip()
+            group = compute_group_value(meta)
 
             # Combine manual columns and derived column names for processing
             cols_to_process = list(dict.fromkeys(list(manual_cols) + [d['name'] for d in derived_defs]))
