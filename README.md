@@ -150,19 +150,47 @@ The app sanitises and truncates generated names so they are safe for most filesy
 
 ### Custom individual allocation mapping
 
-You can override the built-in allocation sets by choosing "Custom" under "Individual allocation mapping" in the sidebar. The UI now accepts arbitrary group names and their member IDs using a single free-form textarea. Enter one group per line with the format:
+You can override the built-in allocation sets by choosing "Custom" under "Individual allocation mapping" in the sidebar. The UI accepts arbitrary group names and their member IDs using a single free-form textarea. Enter one group per line with the format:
 
 GROUP_NAME = ID1, ID2, ID3
 
 Example:
 GROUP_A = L1, L2, L3
 
-Group names are free-form (not limited to IMV/NIV/NIVe/NIVf) and will be used as the `group` value in summaries and export filenames. Definitions are parsed and validated when you click "Save settings" and are stored in the session for subsequent summary calculations. If no custom groups are provided the app falls back to the built-in allocation sets.
+Group names are free-form (not limited to IMV/NIV/NIVe/NIVf) and can be used as the `group` value in summaries and export filenames depending on your **Group source** setting (see below).
 
-### Filename regex validation and time cleaning
+Definitions are parsed and validated when you click **Save settings** and are stored in the session for subsequent summary calculations.
 
-- When using "Regex (named groups)" mode for filename parsing, the app validates the supplied regular expression when you click "Save settings" and will warn if the regex is invalid.
-- Parsed time tokens are cleaned to remove embedded extensions or trailing suffixes (for example `45min.eit` will be parsed as `45min`) so the `time` field contains only the timepoint part of the filename.
+If no custom groups are provided, the app falls back to using other sources (e.g. filename fields like treatment) based on the Group source configuration.
+
+---
+
+### Group source (how the `group` column is chosen)
+
+In the sidebar under **Summary options**, you can control how the summary/export `group` value is derived. This makes grouping modular so you can switch between using custom mapping sets and filename-derived fields.
+
+Available options:
+
+- **Auto (individual → mapping, else treatment)** (default)
+  - Try to find the file's `individual` in your Custom allocation mapping sets.
+  - If no match is found, fall back to the parsed `treatment` from the filename.
+- **From filename: individual** — use the parsed `individual` token
+- **From filename: treatment** — use the parsed `treatment` token
+- **From filename: study** — use the parsed `study` token
+- **From filename: time** — use the parsed `time` token
+- **Fixed value (manual)** — use a manually entered value from the sidebar
+
+Additional fields:
+
+- **Fixed group value**: used only when "Fixed value (manual)" is selected.
+- **Group fallback value**: used when the computed group is blank (e.g. missing token).
+
+These settings affect:
+
+- the `group` column in the summary table
+- the `{group}` token when building export filenames
+
+---
 
 ### Privacy mode and server folder access
 

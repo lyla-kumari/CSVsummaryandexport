@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import zipfile
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 from datetime import datetime
 
 st.set_page_config(page_title="Export App", layout="centered")
@@ -68,54 +68,12 @@ with st.sidebar.form("upload_form"):
     st.markdown("---")
     st.header("Summary options")
 
-    # --- Grouping override (how the 'group' column is created for summary) ---
-    st.subheader("Grouping")
-    st.caption("Choose how the 'group' column is determined for the summary, especially when filenames are missing individual/treatment.")
-    if 'group_source' not in st.session_state:
-        st.session_state['group_source'] = "Auto (individual → mapping, else treatment)"
-    group_source = st.selectbox(
-        "Group source",
-        [
-            "Auto (individual → mapping, else treatment)",
-            "From filename: individual",
-            "From filename: treatment",
-            "From filename: study",
-            "From filename: time",
-            "Fixed value (manual)",
-        ],
-        index=[
-            "Auto (individual → mapping, else treatment)",
-            "From filename: individual",
-            "From filename: treatment",
-            "From filename: study",
-            "From filename: time",
-            "Fixed value (manual)",
-        ].index(st.session_state['group_source']) if st.session_state['group_source'] in [
-            "Auto (individual → mapping, else treatment)",
-            "From filename: individual",
-            "From filename: treatment",
-            "From filename: study",
-            "From filename: time",
-            "Fixed value (manual)",
-        ] else 0,
-    )
-    st.session_state['group_source'] = group_source
-
-    if 'group_fixed_value' not in st.session_state:
-        st.session_state['group_fixed_value'] = "UNKNOWN"
-    if group_source == "Fixed value (manual)":
-        st.text_input("Group value", key='group_fixed_value')
-        st.caption("Used for every row in the summary.")
-
-    if 'group_fallback_value' not in st.session_state:
-        st.session_state['group_fallback_value'] = ""
-    st.text_input("Fallback group (optional)", key='group_fallback_value')
-    st.caption("If the chosen group source is blank for a file, use this value instead (leave empty to allow blanks).")
+    # Grouping UI removed (group is computed automatically during summary export).
 
     alloc_choice = st.selectbox("Individual allocation mapping", ["Default", "Custom"], index=0)
     custom_sets = None
     if alloc_choice == "Custom":
-        st.info("Define groups and their member IDs (one group per line). Format: GROUP = ID1, ID2, ...")
+        st.info("Define groups and their member IDs (one per line). Format: GROUP = ID1, ID2, ...")
         custom_sets_text = st.text_area("Custom group definitions (one per line)", value="")
         def parse_alloc(text: str):
             out = {}
@@ -163,6 +121,26 @@ with st.sidebar.form("upload_form"):
         st.text_input("Filename regex (with named groups)", key='filename_parse_regex')
         st.caption("Provide a regular expression with named groups like (?P<study>...), (?P<individual>...), (?P<treatment>...), (?P<time>...).")
 
+    # Group source selection: make group derivation modular and user-configurable
+    group_source_options = [
+        "Auto (individual → mapping, else treatment)",
+        "From filename: individual",
+        "From filename: treatment",
+        "From filename: study",
+        "From filename: time",
+        "Fixed value (manual)",
+    ]
+    if 'group_source' not in st.session_state:
+        st.session_state['group_source'] = group_source_options[0]
+    st.selectbox("Group source for summary 'group' value", group_source_options, index=group_source_options.index(st.session_state['group_source']), key='group_source')
+    # Allow user to provide a fixed group or a fallback value if computed group is empty
+    if 'group_fixed_value' not in st.session_state:
+        st.session_state['group_fixed_value'] = ''
+    if 'group_fallback_value' not in st.session_state:
+        st.session_state['group_fallback_value'] = ''
+    st.text_input("Fixed group value (used when 'Fixed value (manual)' selected)", key='group_fixed_value')
+    st.text_input("Group fallback value (used when computed group is empty)", key='group_fallback_value')
+
     saved = st.form_submit_button("Save settings")
     if saved:
         # validate regex early so users get feedback
@@ -182,82 +160,172 @@ with st.sidebar.form("upload_form"):
             st.session_state['custom_sets'] = {}
 
 # --- Helpers ---
-IMV = {'L14','L16','L18','L33','L35','L39','L43','L47','L49','L55','L61','L63','L68','L69','L70'}
-NIV = {'L1','L7','L9','L13','L20','L22','L30','L34','L44','L45','L51','L57','L59','L65','L67'}
-NIVe = {'L8','L12','L15','L23','L32','L36','L38','L40','L48','L52','L58','L60','L62','L66'}
-NIVf = {'L2','L17','L19','L31','L46','L54','L56'}
+# Default individual mappings removed. Use Custom allocation mapping in the sidebar if you need
+# individual→group assignment; otherwise grouping will fall back to treatment/other selected source.
+
+# Tokens we try to extract from filenames
+FILENAME_FIELDS = ('study', 'individual', 'treatment', 'time')
 
 
 def assign_group(ind):
     ind = str(ind).upper()
-    # prefer user-specified custom sets (allowing arbitrary group names)
+    # prefer user-specified custom sets stored in session (allowing arbitrary group names)
     try:
-        if custom_sets:
-            for gname, s in custom_sets.items():
-                if ind in s:
-                    return gname
+        custom_sets_sess = st.session_state.get('custom_sets', {}) or {}
+        for gname, s in custom_sets_sess.items():
+            if ind in s:
+                return gname
     except Exception:
         pass
-    # legacy hard-coded sets as fallback
-    if ind in IMV: return 'IMV'
-    if ind in NIV: return 'NIV'
-    if ind in NIVe: return 'NIVe'
-    if ind in NIVf: return 'NIVf'
     return ''
+
+
+def _clean_time(s: str) -> str:
+    if not s:
+        return ''
+    s = str(s).strip()
+    # remove anything after a dot (handles filenames like '..._45min.eit.csv')
+    if '.' in s:
+        s = s.split('.')[0]
+    return s
+
+
+def _looks_like_time(token: str) -> bool:
+    """Heuristic time token detector (birth, 45min, t45, 0h, 30s, etc)."""
+    if not token:
+        return False
+    t = str(token).strip().lower()
+    if not t:
+        return False
+    if 'birth' in t:
+        return True
+    # allow things like 45min, 2h, 30s, t45, day7, d7
+    return bool(re.search(r"\d", t) and re.search(r"(min|m|sec|s|hour|hr|h|day|d|wk|w)?", t))
+
+
+def _parse_filename_regex(base: str) -> Optional[Dict[str, str]]:
+    pattern = st.session_state.get('filename_parse_regex', '')
+    if not pattern:
+        return None
+    try:
+        m = re.match(pattern, base)
+    except re.error:
+        return None
+    if not m:
+        return None
+    gd = m.groupdict() if hasattr(m, 'groupdict') else {}
+    if not gd:
+        return None
+    return {
+        'study': gd.get('study', '') or '',
+        'individual': gd.get('individual', '') or '',
+        'treatment': gd.get('treatment', '') or '',
+        'time': _clean_time(gd.get('time', '') or ''),
+    }
+
+
+def _parse_filename_custom_tokens(base: str) -> Optional[Dict[str, str]]:
+    pattern = st.session_state.get('filename_parse_pattern', '')
+    if not pattern or '{' not in pattern:
+        return None
+
+    token_names = re.findall(r"\{(study|individual|treatment|time)\}", pattern)
+    if not token_names:
+        return None
+
+    # Determine separator: first non-empty literal chunk between tokens, else '_'
+    seps = re.split(r"\{(?:study|individual|treatment|time)\}", pattern)
+    sep = next((s for s in seps if s), '_')
+
+    parts = base.split(sep)
+    if len(parts) < len(token_names):
+        return None
+
+    mapping = {tok: (parts[i] if i < len(parts) else '') for i, tok in enumerate(token_names)}
+    return {
+        'study': mapping.get('study', '') or '',
+        'individual': mapping.get('individual', '') or '',
+        'treatment': mapping.get('treatment', '') or '',
+        'time': _clean_time(mapping.get('time', '') or ''),
+    }
+
+
+def _parse_filename_auto_underscore(base: str) -> Dict[str, str]:
+    """More resilient underscore parser.
+
+    Works with 4+ tokens: <study...>_<individual>_<treatment>_<time>
+    Also tolerates missing tail fields by assigning from right-to-left.
+
+    Examples:
+      STUDY_L01_IMV_45min -> study=STUDY, individual=L01, treatment=IMV, time=45min
+      L01_IMV_45min       -> individual=L01, treatment=IMV, time=45min
+      STUDY_L01_IMV       -> study=STUDY, individual=L01, treatment=IMV
+      STUDY_L01           -> study=STUDY, individual=L01
+      L01                 -> individual=L01
+    """
+    parts = [p for p in str(base).split('_') if p != '']
+    if not parts:
+        return {'study': '', 'individual': '', 'treatment': '', 'time': ''}
+
+    # Start right-to-left inference
+    time = ''
+    treatment = ''
+    individual = ''
+    study = ''
+
+    # Detect time token if last part looks like time
+    if len(parts) >= 1 and _looks_like_time(parts[-1]):
+        time = _clean_time(parts[-1])
+        parts = parts[:-1]
+
+    # Next from the right is treatment (if present)
+    if len(parts) >= 1:
+        treatment = parts[-1]
+        parts = parts[:-1]
+
+    # Next from the right is individual (if present)
+    if len(parts) >= 1:
+        individual = parts[-1]
+        parts = parts[:-1]
+
+    # Remaining (if any) is study, may contain underscores originally
+    if parts:
+        study = '_'.join(parts)
+
+    # If we only had one token originally and no time detected, treat it as study OR individual.
+    # Prefer individual if token looks like an ID (letter+digits) e.g. L01, A974.
+    if not study and not (treatment or time) and individual:
+        tok = individual
+        if re.fullmatch(r"[A-Za-z]+\d+", str(tok)):
+            # keep as individual
+            return {'study': '', 'individual': tok, 'treatment': '', 'time': ''}
+        # else consider it a study
+        return {'study': tok, 'individual': '', 'treatment': '', 'time': ''}
+
+    return {
+        'study': study or '',
+        'individual': individual or '',
+        'treatment': treatment or '',
+        'time': time or '',
+    }
 
 
 def parse_filename(name):
     base = Path(str(name)).stem
     mode = st.session_state.get('filename_parse_mode', 'Auto (underscore parts)')
 
-    def _clean_time(s: str) -> str:
-        if not s:
-            return ''
-        s = str(s).strip()
-        # remove anything after a dot (handles filenames like '..._45min.eit.csv')
-        if '.' in s:
-            s = s.split('.')[0]
-        return s
+    # Prefer user-selected modes, but fall back gracefully to Auto if they don't match
+    if str(mode).startswith('Regex'):
+        parsed = _parse_filename_regex(base)
+        if parsed:
+            return parsed
 
-    if mode.startswith('Regex'):
-        pattern = st.session_state.get('filename_parse_regex', '')
-        if pattern:
-            try:
-                m = re.match(pattern, base)
-                if m:
-                    gd = m.groupdict()
-                    return {
-                        'study': gd.get('study','') or '',
-                        'individual': gd.get('individual','') or '',
-                        'treatment': gd.get('treatment','') or '',
-                        'time': _clean_time(gd.get('time','') or ''),
-                    }
-            except re.error:
-                pass
+    if str(mode).startswith('Custom'):
+        parsed = _parse_filename_custom_tokens(base)
+        if parsed:
+            return parsed
 
-    if mode.startswith('Custom'):
-        pattern = st.session_state.get('filename_parse_pattern', '')
-        if pattern and '{' in pattern:
-            token_names = re.findall(r"\{(study|individual|treatment|time)\}", pattern)
-            seps = re.split(r"\{(?:study|individual|treatment|time)\}", pattern)
-            sep = next((s for s in seps if s), '_')
-            parts = base.split(sep)
-            if len(parts) >= len(token_names):
-                mapping = {tok: (parts[i] if i < len(parts) else '') for i, tok in enumerate(token_names)}
-                return {
-                    'study': mapping.get('study','') or '',
-                    'individual': mapping.get('individual','') or '',
-                    'treatment': mapping.get('treatment','') or '',
-                    'time': _clean_time(mapping.get('time','') or ''),
-                }
-
-    parts = base.split('_')
-    study = '_'.join(parts[:-3]) if len(parts) >= 4 else parts[0]
-    individual = parts[-3] if len(parts) >= 4 else ''
-    treatment = parts[-2] if len(parts) >= 4 else ''
-    time = parts[-1] if len(parts) >= 4 else ''
-    time = _clean_time(time)
-    return {'study': study, 'individual': individual, 'treatment': treatment, 'time': time}
+    return _parse_filename_auto_underscore(base)
 
 
 def norm(s):
@@ -901,12 +969,11 @@ else:
 
     def get_group_for(individual):
         ind = str(individual).upper()
-        if custom_sets:
-            for gname, s in custom_sets.items():
-                if ind in s:
-                    return gname
-            return ''
-        return assign_group(ind)
+        custom_sets_sess = st.session_state.get('custom_sets', {}) or {}
+        for gname, s in custom_sets_sess.items():
+            if ind in s:
+                return gname
+        return ''
 
     def compute_group_value(meta: Dict[str, str]) -> str:
         """Compute the summary 'group' based on user override settings."""
