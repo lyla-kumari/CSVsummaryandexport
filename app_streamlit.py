@@ -892,7 +892,12 @@ else:
                     continue
 
             meta = parse_filename(name)
-            group = get_group_for(meta.get('individual','')) or meta.get('treatment','')
+            # Grouping rule:
+            # 1) If a custom/default allocation mapping assigns a group, use it.
+            # 2) Otherwise, group by the individual ID (so single-patient datasets don't end up with blank groups).
+            group = get_group_for(meta.get('individual', ''))
+            if not group:
+                group = (meta.get('individual', '') or '').strip()
 
             # Combine manual columns and derived column names for processing
             cols_to_process = list(dict.fromkeys(list(manual_cols) + [d['name'] for d in derived_defs]))
