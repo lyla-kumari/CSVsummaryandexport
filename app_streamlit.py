@@ -28,23 +28,12 @@ else:
 # --- Sidebar: upload and settings ---
 with st.sidebar.form("upload_form"):
     st.header("Upload / Source")
-    privacy_mode = st.checkbox(
-        "Enable privacy mode (data stays local; disables server folder access)",
-        value=True,
-    )
 
-    if privacy_mode:
-        upload_mode = st.selectbox(
-            "Upload mode",
-            ["Multiple CSV files", "ZIP archive (upload)"],
-            index=0,
-        )
-    else:
-        upload_mode = st.selectbox(
-            "Upload mode",
-            ["Multiple CSV files", "Folder (server)", "ZIP archive (upload)"],
-            index=0,
-        )
+    upload_mode = st.selectbox(
+        "Upload mode",
+        ["Multiple CSV files", "Folder (server)", "ZIP archive (upload)"],
+        index=0,
+    )
 
     uploaded = None
     folder_path = None
@@ -75,6 +64,7 @@ with st.sidebar.form("upload_form"):
     if alloc_choice == "Custom":
         st.info("Define groups and their member IDs (one per line). Format: GROUP = ID1, ID2, ...")
         custom_sets_text = st.text_area("Custom group definitions (one per line)", value="")
+
         def parse_alloc(text: str):
             out = {}
             if not text:
@@ -92,6 +82,7 @@ with st.sidebar.form("upload_form"):
                 if members:
                     out[gname] = members
             return out
+
         custom_sets = parse_alloc(custom_sets_text)
         if not custom_sets:
             st.warning("No valid custom groups parsed yet. Use the format: GROUP = L1,L2,...")
@@ -733,7 +724,7 @@ elif upload_mode == "ZIP archive (upload)" and uploaded:
         except Exception as e:
             st.error(f"Failed to read uploaded ZIP: {e}")
 
-elif upload_mode == "Folder (server)" and not privacy_mode:
+elif upload_mode == "Folder (server)":
     if folder_path and scan_folder:
         if st.button("Scan folder and load CSVs"):
             p = Path(folder_path)
