@@ -126,11 +126,20 @@ Export to CSV
 
 ### Filename parsing & export filename tokens
 
-The app provides flexible filename parsing to extract study, individual, treatment and time information from file names. You can choose the parsing mode in the sidebar:
+The app provides flexible filename parsing to extract **study**, **individual**, **treatment** and **time** information from file names. You can choose the parsing mode in the sidebar:
 
-- Auto (underscore parts): splits the file stem on underscores and assigns the last three parts to individual, treatment and time (the remainder is treated as study).
-- Custom pattern (tokens): use a token template like `{study}_{individual}_{treatment}_{time}` to map parts directly.
-- Regex (named groups): provide a regular expression with named groups such as `(?P<study>...)`, `(?P<individual>...)`, `(?P<treatment>...)`, `(?P<time>...)` for full control over parsing.
+- **Auto (underscore parts)**: splits the filename stem on underscores and infers fields from **right to left**.
+  - If the last token looks like a time (e.g. `45min`, `2h`, `birth`), it is treated as `time`.
+  - The next tokens (moving left) are treated as `treatment` then `individual`.
+  - Any remaining left-hand tokens are treated as `study` (and may contain underscores).
+  - Examples:
+    - `STUDY_L01_IMV_45min` → study=`STUDY`, individual=`L01`, treatment=`IMV`, time=`45min`
+    - `L01_IMV_45min` → individual=`L01`, treatment=`IMV`, time=`45min`
+    - `STUDY_L01_IMV` → study=`STUDY`, individual=`L01`, treatment=`IMV`
+- **Custom pattern (tokens)**: use a token template like `{study}_{individual}_{treatment}_{time}` to map parts directly.
+  - Use this when your filenames are consistent and tokens never include the separator.
+- **Regex (named groups)**: provide a regular expression with named groups such as `(?P<study>...)`, `(?P<individual>...)`, `(?P<treatment>...)`, `(?P<time>...)` for full control over parsing.
+  - Use this when tokens may include separators or the overall structure is more complex.
 
 When exporting files or summaries the app also supports a user-editable filename pattern with tokens. Supported tokens are:
 
