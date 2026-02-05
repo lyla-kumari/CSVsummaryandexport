@@ -114,7 +114,7 @@ with st.sidebar.form("upload_form"):
 
     # Group source selection: make group derivation modular and user-configurable
     group_source_options = [
-        "Auto (individual → mapping, else treatment)",
+        "Auto (individual → custom groups, else treatment)",
         "From filename: individual",
         "From filename: treatment",
         "From filename: study",
@@ -968,7 +968,7 @@ else:
 
     def compute_group_value(meta: Dict[str, str]) -> str:
         """Compute the summary 'group' based on user override settings."""
-        source = st.session_state.get('group_source', "Auto (individual → mapping, else treatment)")
+        source = st.session_state.get('group_source', "Auto (individual → custom groups, else treatment)")
         fallback = (st.session_state.get('group_fallback_value', '') or '').strip()
 
         group_val = ''
